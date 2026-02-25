@@ -20,22 +20,35 @@ from logger import log
 
 def generate_insight(question: str, data_summary: str) -> str:
     """
-    Generate a plain-English insight paragraph.
-
+    Generate structured insight bullets instead of a paragraph.
+    
     Args:
         question:     The user's original question
         data_summary: Compact string of facts from eda.format_insights_for_llm()
 
     Returns:
-        A 3-5 sentence paragraph explaining the findings.
+        Structured bullet points with specific insights.
 
     Raises:
         RuntimeError: If the LLM call fails
     """
-    log("INSIGHT", f"Generating summary for: {question[:100]}")
+    log("INSIGHT", f"Generating bullet insights for: {question[:100]}")
 
-    # Build the prompt
-    prompt = insight_summary_prompt(question, data_summary)
+    # Build the prompt for bullet-point insights
+    prompt = f"""You are a data analyst. Write 3-5 bullet points about these findings.
+
+QUESTION: {question}
+
+DATA: {data_summary}
+
+RULES:
+1. Use ONLY the numbers from DATA above
+2. Format numbers with commas: 4,240,553.19 not 4240553.19
+3. Keep each bullet to 1-2 sentences
+4. Make sure words are separated by spaces
+5. Start each line with • followed by a space
+
+Write exactly 3-5 bullet points now:"""
 
     # Call the LLM
     try:

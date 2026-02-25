@@ -173,26 +173,60 @@ def create_chart(df: pd.DataFrame):
 
 def _create_multi_chart_dashboard(df: pd.DataFrame, categorical_cols: list, numeric_cols: list) -> list:
     """
-    Create multiple charts for multi-dimensional data.
+    Create multiple charts when the query asks for multiple metrics.
     
-    Example: If data has 'category', 'region', and 'revenue':
-      - Chart 1: Revenue by category
-      - Chart 2: Revenue by region
-    
-    Returns list of up to 3 charts, or None if not applicable.
+    Works when you have:
+    - 2 numeric columns (e.g., revenue AND order_count)
+    - OR 2 categorical columns with 1 numeric
     """
-    # Only create multi-chart if we have <=10 rows total
-    # (otherwise each chart becomes too small to read)
-    if len(df) > 10:
+    log("MULTI_CHART", f"Check: {len(df)} rows, {len(numeric_cols)} numeric cols, {len(categorical_cols)} categorical cols")
+    
+    # Need at least 2 dimensions to chart
+    if len(numeric_cols) < 2 and len(categorical_cols) < 2:
+        log("MULTI_CHART", "Skip: Need 2+ numeric OR 2+ categorical columns")
+        return None
+    
+    # Too many rows gets messy
+    if len(df) > 25:
+        log("MULTI_CHART", f"Skip: Too many rows ({len(df)})")
         return None
     
     charts = []
-    num_col = numeric_cols[0]  # Use first numeric column as the metric
     
-    # Create a chart for each categorical dimension
-    for cat_col in categorical_cols[:3]:  # Max 3 charts to avoid clutter
-        if df[cat_col].nunique() <= 10:  # Skip if too many categories
-            df_sorted = df.sort_values(num_col, ascending=False)
+    # Case 1: Multiple numeric columns (revenue + order_count + etc)
+    if len(numeric_cols) >= 2 and len(categorical_cols) >= 1:
+        cat_col = categorical_cols[0]
+        log("MULTI_CHART", f"Creating chart for each of {len(numeric_cols)} numeric columns")
+        
+        # Create one chart per numeric column
+        for num_col in numeric_cols[:3]:  # Max 3 charts
+            df_sorted = df.sort_values(num_col, ascending=False).head(15)  # Top 15 only
+            fig = px.bar(
+                df_sorted,
+                x=cat_col,
+                y=num_col,
+                title=f"{num_col.replace('_', ' ').title()}",
+                labels={
+                    cat_col: cat_col.replace('_', ' ').title(),
+                    num_col: num_col.replace('_', ' ').title(),
+                },
+            )
+            charts.append(fig)
+            log("MULTI_CHART", f"  ✓ Chart added: {num_col}")
+    
+    # Case 2: Multiple categorical columns (category + region + etc)
+    elif len(categorical_cols) >= 2 and len(numeric_cols) >= 1:
+        num_col = numeric_cols[0]
+        log("MULTI_CHART", f"Creating chart for each of {len(categorical_cols)} categorical columns")
+        
+        # Create one chart per categorical dimension
+        for cat_col in categorical_cols[:3]:  # Max 3 charts
+            unique_vals = df[cat_col].nunique()
+            if unique_vals > 20:
+                log("MULTI_CHART", f"  ✗ Skip {cat_col}: too many values ({unique_vals})")
+                continue
+                
+            df_sorted = df.sort_values(num_col, ascending=False).head(15)
             fig = px.bar(
                 df_sorted,
                 x=cat_col,
@@ -204,10 +238,15 @@ def _create_multi_chart_dashboard(df: pd.DataFrame, categorical_cols: list, nume
                 },
             )
             charts.append(fig)
+            log("MULTI_CHART", f"  ✓ Chart added: {cat_col}")
     
+    # Return if we got 2+ charts
     if len(charts) >= 2:
-        log("CHART", f"Created multi-chart dashboard with {len(charts)} charts")
+        log("MULTI_CHART", f"✓ SUCCESS: Created {len(charts)} charts")
         return charts
+    else:
+        log("MULTI_CHART", f"✗ FAIL: Only got {len(charts)} chart(s), need 2+")
+        return None
     
     return None  # Fall back to single chart if multi-chart doesn't make sense
 

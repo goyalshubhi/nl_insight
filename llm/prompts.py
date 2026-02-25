@@ -37,6 +37,7 @@ STRICT RULES:
 1. Return ONLY the raw SQL query. No explanation, no markdown, no code blocks, no backticks.
 2. Only use SELECT statements. Never INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE.
 3. Only reference tables and columns that exist in the SCHEMA above.
+4. ALWAYS use case-insensitive text comparisons: WHERE UPPER(column) = UPPER('value') or column ILIKE 'value'
 
 LIMIT RULES:
 - If question asks for "the" (singular) or "which one" → LIMIT 1

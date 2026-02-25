@@ -252,11 +252,27 @@ def generate_templates_for_schema(engine) -> list[dict]:
         })
         
         templates.append({
+            "id": "bottom_by_category",
+            "category": "🏆 Rankings",
+            "title": f"Bottom 10 by {first_categorical.replace('_', ' ').title()}",
+            "question": f"Show bottom 10 {first_categorical} by total {first_numeric}.",
+            "description": f"Lowest {first_numeric} across different {first_categorical}"
+        })
+        
+        templates.append({
             "id": "breakdown_by_category",
             "category": "📊 Breakdown",
             "title": f"Distribution by {first_categorical.replace('_', ' ').title()}",
             "question": f"Show total {first_numeric} grouped by {first_categorical}.",
             "description": f"Break down {first_numeric} by {first_categorical}"
+        })
+        
+        templates.append({
+            "id": "average_by_category",
+            "category": "📊 Breakdown",
+            "title": f"Average {first_numeric.title()} by {first_categorical.title()}",
+            "question": f"Show average {first_numeric} for each {first_categorical}.",
+            "description": f"Mean {first_numeric} per {first_categorical}"
         })
         
         if len(categorical_cols) >= 2:
@@ -408,12 +424,22 @@ def generate_templates_for_schema(engine) -> list[dict]:
             })
     
     # ── GENERIC TEMPLATES (ALWAYS AVAILABLE) ───────────────────────────────────
+    # Always add these, regardless of patterns detected
+    
     templates.append({
         "id": "preview_data",
         "category": "🔍 General",
         "title": "Preview Data",
         "question": f"Show the first 10 rows from {first_table}.",
         "description": "Quick look at your data"
+    })
+    
+    templates.append({
+        "id": "row_count",
+        "category": "🔍 General", 
+        "title": "Total Row Count",
+        "question": f"How many total rows are in {first_table}?",
+        "description": "Count all records"
     })
     
     if first_numeric:
@@ -424,6 +450,15 @@ def generate_templates_for_schema(engine) -> list[dict]:
             "question": f"What are the minimum, maximum, and average values of {first_numeric}?",
             "description": "Basic descriptive statistics"
         })
+        
+        if first_categorical:
+            templates.append({
+                "id": "simple_breakdown",
+                "category": "🔍 General",
+                "title": f"{first_numeric.title()} by {first_categorical.title()}",
+                "question": f"Show {first_numeric} grouped by {first_categorical}.",
+                "description": f"Simple breakdown"
+            })
     
     if len(numeric_cols) >= 2:
         templates.append({
@@ -432,6 +467,15 @@ def generate_templates_for_schema(engine) -> list[dict]:
             "title": f"Compare {numeric_cols[0]} vs {numeric_cols[1]}",
             "question": f"Show {numeric_cols[0]} and {numeric_cols[1]} side by side.",
             "description": "Compare two metrics"
+        })
+    
+    if first_categorical and len(categorical_cols) >= 1:
+        templates.append({
+            "id": "unique_values",
+            "category": "🔍 General",
+            "title": f"Unique {first_categorical.title()} Values",
+            "question": f"Show all unique values in {first_categorical} column.",
+            "description": f"List distinct {first_categorical} entries"
         })
     
     log("TEMPLATE", f"Generated {len(templates)} templates for schema with patterns: {patterns}")

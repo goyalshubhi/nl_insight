@@ -1,15 +1,16 @@
 """
 app.py — Streamlit entry point for NL Insight.
 
-Supports two data source modes:
-  1. PostgreSQL — connect to an existing database (development/production)
-  2. CSV Upload — upload a file and query it instantly (demos/non-technical users)
-
-Phase 2 complete: Full NL → SQL → DataFrame pipeline working.
-Phase 3 coming: Charts and EDA analysis.
+Complete system with all features:
+- PostgreSQL + CSV upload modes
+- Query history with re-run
+- Smart follow-up suggestions
+- Data quality reports
+- Anomaly detection
+- Bullet-point insights
 """
 
-# ── Path fix (MUST be first) ──────────────────────────────────────────────────
+# ── Path fix ───────────────────────────────────────────────────────────────────
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -20,15 +21,18 @@ import pandas as pd
 
 import config
 from db.connector import get_engine, test_connection
-from db.schema_reader import get_schema, format_schema_for_prompt
+from db.schema_reader import get_schema
 from db.csv_importer import create_engine_from_file, validate_uploaded_file
 from pipeline.sql_generator import generate_sql
 from pipeline.query_runner import run_query
 from pipeline.visualizer import create_chart
 from pipeline.eda import analyze_dataframe, format_insights_for_llm
 from pipeline.summarizer import generate_insight
-from pipeline.templates import get_templates_by_category, get_template_by_id
 from pipeline.comparative_analyzer import is_comparison_query, enhance_comparison_result, generate_comparison_insight
+from pipeline.query_history import init_history, add_to_history, get_history, format_timestamp
+from pipeline.data_quality import analyze_data_quality, format_quality_report
+from pipeline.followup_suggestions import generate_followup_questions
+from pipeline.anomaly_detector import detect_anomalies
 from export.csv_exporter import export_to_csv, generate_data_dictionary
 from logger import log
 
@@ -45,7 +49,17 @@ st.caption("Ask business questions in plain English — no SQL required.")
 
 st.divider()
 
-# ── Data Source Selection ─────────────────────────────────────────────────────
+# Initialize history
+init_history()
+
+
+# ── Session state keys ─────────────────────────────────────────────────────────
+# We manage the question input via session_state so "click-to-run" (history/followups)
+# can reliably populate the text box and auto-execute on rerun.
+st.session_state.setdefault("question_input", "")
+st.session_state.setdefault("pending_question", None)   # question to inject into textbox on next rerun
+st.session_state.setdefault("auto_run", False)          # whether to auto-execute Analyse on rerun
+# ── Sidebar: Data Source + History ────────────────────────────────────────────
 
 with st.sidebar:
     st.header("📂 Data Source")
@@ -99,13 +113,11 @@ elif data_mode == "Upload CSV/Excel":
         )
         st.stop()
 
-    # Validate file
     valid, error_msg = validate_uploaded_file(uploaded_file)
     if not valid:
         st.error(error_msg)
         st.stop()
 
-    # Convert to SQLite database
     with st.spinner("📊 Processing your file..."):
         try:
             engine, table_name, row_count = create_engine_from_file(uploaded_file)
@@ -117,45 +129,36 @@ elif data_mode == "Upload CSV/Excel":
             st.error(str(e))
             st.stop()
 
-# ── Templates Sidebar (Now that engine exists) ────────────────────────────────
+# ── Query History Sidebar ──────────────────────────────────────────────────────
 
 with st.sidebar:
     st.divider()
-    st.header("📊 Analytics Templates")
-    st.caption("One-click reports based on your data")
+    st.header("📜 Query History")
     
-    # Only show templates if we have a valid engine
-    try:
-        templates_by_category = get_templates_by_category(engine)
+    history = get_history()
+    
+    if history:
+        st.caption(f"{len(history)} recent queries")
         
-        if templates_by_category:
-            selected_template = None
-            for category, templates in templates_by_category.items():
-                with st.expander(f"{category}", expanded=False):
-                    for template in templates:
-                        if st.button(
-                            template["title"],
-                            key=f"template_{template['id']}",
-                            help=template["description"],
-                            use_container_width=True
-                        ):
-                            selected_template = template
-            
-            # Store selected template in session state
-            if selected_template:
-                st.session_state['selected_template'] = selected_template
-                st.rerun()
-        else:
-            st.caption("No templates available for this schema")
-    except Exception as e:
-        st.caption(f"Templates unavailable: {str(e)[:50]}")
+        for idx, entry in enumerate(history[:5]):  # Show last 5
+            with st.expander(
+                f"🕐 {format_timestamp(entry['timestamp'])} • {entry['row_count']} rows",
+                expanded=False
+            ):
+                st.caption(entry['question'])
+                if st.button("🔄 Re-run", key=f"rerun_{idx}"):
+                    st.session_state['pending_question'] = entry['question']
+                    st.session_state['auto_run'] = True
+                    st.rerun()
+    else:
+        st.caption("No queries yet")
 
 # ── Schema Sidebar ────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.divider()
     st.header("📋 Database Schema")
-    st.caption("Tables and columns available for queries")
+    st.caption("Tables and columns available")
 
     schema = get_schema(engine)
 
@@ -163,7 +166,7 @@ with st.sidebar:
         st.warning("No tables found in the database.")
     else:
         for table_name, columns in schema.items():
-            with st.expander(f"🗂 {table_name}", expanded=True):
+            with st.expander(f"🗂 {table_name}", expanded=False):
                 for col in columns:
                     st.markdown(f"- `{col['name']}` — *{col['type']}*")
 
@@ -171,78 +174,62 @@ with st.sidebar:
     st.caption(f"🤖 Provider: `{config.LLM_PROVIDER}`")
     if config.LLM_PROVIDER == "groq":
         st.caption(f"Model: `{config.GROQ_MODEL}`")
-    elif config.LLM_PROVIDER == "gemini":
-        st.caption(f"Model: `{config.GEMINI_MODEL}`")
-    else:
-        st.caption(f"Model: `{config.OLLAMA_MODEL}`")
     st.caption(f"Row limit: `{config.QUERY_ROW_LIMIT}`")
 
 # ── Question Input ────────────────────────────────────────────────────────────
 
 st.subheader("💬 Ask a question about your data")
 
-# Check if a template was selected
-default_question = ""
-auto_run = False
-
-if 'selected_template' in st.session_state:
-    template = st.session_state['selected_template']
-    default_question = template['question']
-    auto_run = True
-    st.info(f"📋 **Template selected:** {template['title']}\n\n{template['description']}")
-    # Clear the template after displaying
-    del st.session_state['selected_template']
-
 EXAMPLE_QUESTIONS = [
-    # Simple aggregations
     "Which city had the highest total revenue?",
     "Show the top 5 customers by total spending.",
     "What is the count of orders by status?",
-    
-    # Intermediate - date filters
     "Which products were ordered in the last 30 days?",
-    "Show monthly revenue for 2024.",
-    
-    # Advanced - window functions and ranking
-    "Show the top 3 products by revenue in each category.",
-    "Which customers made repeat purchases within 7 days?",
-    
-    # Anti-joins
-    "Which customers have never placed an order?",
-    "Show products that have never been ordered.",
+    "Compare Electronics and Clothing category revenue.",
 ]
 
-# In CSV mode, show simpler examples
 if data_mode == "Upload CSV/Excel":
     EXAMPLE_QUESTIONS = [
         "Show me the first 10 rows.",
-        "What are the column names?",
-        "Count the total number of rows.",
-        "What is the average value in each numeric column?",
-        "Show me rows where [column_name] is greater than [value].",
+        "What is the total in the first numeric column?",
+        "Count rows grouped by the first categorical column.",
     ]
 
-with st.expander("💡 Example questions — click to see ideas"):
+with st.expander("💡 Example questions"):
     for q in EXAMPLE_QUESTIONS:
         st.markdown(f"- *{q}*")
 
+# Check for re-run from history or follow-up
+# If something set a pending question, inject it into the textbox state.
+if st.session_state.get("pending_question"):
+    st.session_state["question_input"] = st.session_state["pending_question"]
+    st.session_state["pending_question"] = None
+
+# DEBUG PANEL
+with st.expander("🔧 DEBUG: Session State", expanded=False):
+    st.write("Full session state:", dict(st.session_state))
+
 question = st.text_area(
     label="Your question",
-    value=default_question,  # Pre-fill with template question if selected
+    key="question_input",
     placeholder="e.g. Which product has the lowest sales last month?",
     height=80,
     label_visibility="collapsed",
 )
 
+st.caption("💡 Click the **Analyse** button below to run your query")
+
 run_button = st.button("🔍 Analyse", type="primary", disabled=not question.strip())
 
-# Auto-run if template was selected
-if auto_run and question.strip():
+# Auto-run if a follow-up/history click requested it
+if st.session_state.get("auto_run") and question.strip():
     run_button = True
-
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
 if run_button and question.strip():
+    # Prevent auto-run from triggering repeatedly on subsequent reruns
+    st.session_state['auto_run'] = False
+
     log("QUESTION", question.strip())
 
     st.divider()
@@ -255,10 +242,10 @@ if run_button and question.strip():
         except (ValueError, RuntimeError) as e:
             status.update(label="❌ SQL generation failed", state="error")
             st.error(str(e))
+            add_to_history(question.strip(), 0, success=False)
             st.stop()
 
-    # Show the generated SQL
-    with st.expander("🔎 Generated SQL (click to see the query)"):
+    with st.expander("🔎 Generated SQL"):
         st.code(sql, language="sql")
 
     # ── Step 2: Execute Query ──────────────────────────────────────────────────
@@ -269,108 +256,149 @@ if run_button and question.strip():
                 label=f"✅ Query complete — {len(df):,} rows returned",
                 state="complete"
             )
+            add_to_history(question.strip(), len(df), success=True)
         except RuntimeError as e:
             status.update(label="❌ Query execution failed", state="error")
             st.error(str(e))
+            add_to_history(question.strip(), 0, success=False)
             st.stop()
 
-    # ── Step 3: Show Results ───────────────────────────────────────────────────
+    # ── Step 3: Results + Download ─────────────────────────────────────────────
     st.subheader("📊 Results")
 
     if df.empty:
         st.info("The query returned no results. Try adjusting your question.")
     else:
-        # Action buttons at the top
         col1, col2 = st.columns([3, 1])
         with col1:
             st.caption(f"{len(df):,} rows × {len(df.columns)} columns")
         with col2:
-            # CSV download button
             csv_data = export_to_csv(df)
             st.download_button(
                 label="📥 Download CSV",
                 data=csv_data,
                 file_name="query_results.csv",
                 mime="text/csv",
-                help="Download results for Power BI, Excel, or further analysis"
+                help="Download for Power BI or Excel"
             )
         
-        # Show the raw data table
         st.dataframe(df, use_container_width=True)
 
-        # Row limit warning
         if len(df) >= config.QUERY_ROW_LIMIT:
             st.warning(
-                f"⚠️ Results are capped at {config.QUERY_ROW_LIMIT:,} rows. "
-                "Add filters to your question for more specific results."
+                f"⚠️ Results capped at {config.QUERY_ROW_LIMIT:,} rows. "
+                "Add filters for more specific results."
             )
 
-    # ── Step 4: Comparative Analysis Enhancement ──────────────────────────────
+    # ── Step 4: Data Quality Check ─────────────────────────────────────────────
+    if not df.empty:
+        with st.status("🔍 Checking data quality...", expanded=False) as status:
+            quality = analyze_data_quality(df)
+            status.update(label=quality['summary'], state="complete")
+        
+        if quality['missing_values'] or quality['duplicate_rows'] or quality['outliers']:
+            with st.expander("⚠️ Data Quality Issues Detected"):
+                st.markdown(format_quality_report(quality))
+
+    # ── Step 5: Anomaly Detection ──────────────────────────────────────────────
+    if not df.empty and len(df) >= 3:
+        anomalies = detect_anomalies(df, question.strip())
+        
+        if anomalies:
+            st.subheader("🚨 Anomalies Detected")
+            for anomaly in anomalies:
+                if anomaly['severity'] == 'high':
+                    st.error(f"{anomaly['icon']} {anomaly['message']}")
+                elif anomaly['severity'] == 'medium':
+                    st.warning(f"{anomaly['icon']} {anomaly['message']}")
+                else:
+                    st.info(f"{anomaly['icon']} {anomaly['message']}")
+
+    # ── Step 6: Comparison Enhancement ─────────────────────────────────────────
     is_comparison = is_comparison_query(question.strip())
     
     if is_comparison and not df.empty:
-        with st.status("🔄 Enhancing comparison analysis...", expanded=False) as status:
+        with st.status("🔄 Enhancing comparison...", expanded=False) as status:
             df = enhance_comparison_result(df, question.strip())
             status.update(label="✅ Comparison metrics added", state="complete")
     
-    # ── Step 5: Visualize ──────────────────────────────────────────────────────
+    # ── Step 7: Visualize ──────────────────────────────────────────────────────
     if not df.empty:
         with st.status("📈 Creating visualization...", expanded=False) as status:
             chart_result = create_chart(df)
             
             if isinstance(chart_result, list):
-                # Multi-chart dashboard
                 status.update(label=f"✅ Created {len(chart_result)} charts", state="complete")
             elif chart_result:
-                # Single chart
                 status.update(label="✅ Chart created", state="complete")
             else:
-                status.update(label="ℹ️ No suitable chart for this data", state="complete")
+                status.update(label="ℹ️ No suitable chart", state="complete")
 
-        # Display charts
         if isinstance(chart_result, list):
-            # Multi-chart dashboard - show side by side
             st.subheader("📊 Multi-Dimensional Analysis")
-            cols = st.columns(min(len(chart_result), 2))  # Max 2 charts per row
+            cols = st.columns(min(len(chart_result), 2))
             for idx, chart in enumerate(chart_result):
                 with cols[idx % 2]:
                     st.plotly_chart(chart, use_container_width=True)
         elif chart_result:
-            # Single chart
             st.plotly_chart(chart_result, use_container_width=True)
 
-    # ── Step 6: EDA + Insight Summary ──────────────────────────────────────────
+    # ── Step 8: Insights (Bullet Points) ───────────────────────────────────────
     if not df.empty:
         with st.status("🔍 Analyzing data...", expanded=False) as status:
             insights = analyze_dataframe(df)
             status.update(label="✅ Analysis complete", state="complete")
 
-        # Generate AI insight summary
-        with st.status("✨ Generating insight summary...", expanded=False) as status:
+        with st.status("✨ Generating insights...", expanded=False) as status:
             data_summary = format_insights_for_llm(insights)
             
             try:
                 if is_comparison:
-                    # For comparison queries, add comparison-specific insight
                     comparison_insight = generate_comparison_insight(df, question.strip())
-                    insight_text = f"{comparison_insight}\n\n" + generate_insight(question.strip(), data_summary)
+                    insight_text = f"**Comparison Finding:**\n{comparison_insight}\n\n**Detailed Insights:**\n" + generate_insight(question.strip(), data_summary)
                 else:
                     insight_text = generate_insight(question.strip(), data_summary)
                     
-                status.update(label="✅ Insight generated", state="complete")
+                status.update(label="✅ Insights generated", state="complete")
             except Exception as e:
                 status.update(label="⚠️ Insight generation failed", state="error")
-                insight_text = f"Could not generate insight: {e}"
+                insight_text = f"Could not generate insights: {e}"
 
-        # Display the insight
         st.subheader("💡 Key Insights")
         st.info(insight_text)
 
-        # Show raw stats in an expander for transparency
         with st.expander("📊 Detailed statistics"):
             st.text(data_summary)
-            
             st.divider()
-            st.caption("📖 Data Dictionary (for documentation)")
-            data_dict = generate_data_dictionary(df)
-            st.text(data_dict)
+            st.caption("📖 Data Dictionary")
+            st.text(generate_data_dictionary(df))
+
+    # ── Step 9: Follow-Up Suggestions ──────────────────────────────────────────
+    if not df.empty and len(df) > 0:
+        with st.status("💭 Generating follow-up suggestions...", expanded=False) as status:
+            try:
+                followups = generate_followup_questions(question.strip(), df, insight_text)
+                if followups:
+                    status.update(label="✅ Suggestions ready", state="complete")
+                else:
+                    status.update(label="ℹ️ No suggestions", state="complete")
+            except Exception as e:
+                status.update(label="⚠️ Suggestion generation failed", state="error")
+                followups = []
+        
+        if followups:
+            st.subheader("🔮 What to explore next?")
+            st.caption("Click any question to run it")
+            
+            cols = st.columns(3)
+            for idx, followup_q in enumerate(followups):
+                with cols[idx % 3]:
+                    if st.button(
+                        followup_q,
+                        key=f"followup_{idx}",
+                        use_container_width=True,
+                        type="secondary"
+                    ):
+                        st.session_state['pending_question'] = followup_q
+                        st.session_state['auto_run'] = True
+                        st.rerun()
